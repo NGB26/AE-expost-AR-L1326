@@ -11,8 +11,11 @@ biologicos y las fechas de corte de beta se declaran a mano, en bloques
 `# EDITAR` claramente marcados dentro del propio script (secciones 2.1 y
 2.2), salvo la poblacion (N), que se toma directamente de los datos de OWID.
 
-`sigma` y `ve_contagio` quedan en `NA_real_` hasta completarlos con fuente
-bibliografica. `theta` ya no se fija a mano: se calibra junto con beta en un
-proceso iterativo (Bloque 3) que alterna entre ajustar los 5 beta (uno por
-tramo) y ajustar theta (un unico valor para toda la serie), quedandose con
-el mejor par encontrado.
+`sigma` (tasa de vacunacion) se calcula a partir de la cobertura de
+vacunados completos de OWID; `ve_contagio` (efectividad vacunal contra el
+contagio) sale de un promedio ponderado por el mix de vacunas aplicadas en
+Argentina, con fuente citada en el propio script (Bloque 2.1). `theta` ya no
+se fija a mano: se calibra junto con beta en un proceso iterativo (Bloque 3)
+que alterna entre ajustar los 5 beta (uno por tramo) y ajustar theta (un
+unico valor para toda la serie), quedandose con el mejor par encontrado. La
+funcion de perdida es el MSRE (Mean Squared Relative Error) semanal.
