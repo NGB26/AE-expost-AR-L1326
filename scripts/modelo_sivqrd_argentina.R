@@ -20,9 +20,9 @@
 # alcance el maximo de iteraciones). Los demas parametros (gamma, delta,
 # sigma, beta_v, gamma_v, delta_v) son fijos y no se calibran.
 #
-# FUNCION DE PERDIDA: MSE(log1p(muertes modelo con rezago), log1p(muertes
-# OWID)) sobre la agregacion semanal (no diaria), tanto para beta como para
-# theta.
+# FUNCION DE PERDIDA: MSRE (Mean Squared Relative Error) semanal, calculado
+# sobre log1p(muertes) en vez de sobre el nivel (ver Bloque 3 para el porque),
+# tanto para beta como para theta.
 # ============================================================================
 
 library(tidyverse)   # dplyr, tidyr, purrr, ggplot2
@@ -31,13 +31,19 @@ library(deSolve)     # integracion numerica de las ecuaciones diferenciales
 library(scales)      # formato de ejes en los graficos
 
 # ----------------------------------------------------------------------------
-# BLOQUE 0 - CONSTANTES DE SERIE
+# BLOQUE 0 - CONSTANTES DE SERIE Y FECHAS DE CORTE DE BETA (EDITAR ACA)
 # ----------------------------------------------------------------------------
 
-ruta_excel_parametros <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Project Completition Reports/AR-L1326/PCR/Análisis Económico/AE expost AR-L1326/data/raw/SIRD_Argentina_PCR.xlsx"
-
-fecha_inicio_serie <- as.Date("2020-03-08")   # semana 1, igual que Datos_OWID
+fecha_inicio_serie <- as.Date("2020-03-08")   # semana 1
 fecha_fin_serie    <- as.Date("2022-06-05")   # ultima semana de la serie
+
+# Fechas de corte de beta: definen el inicio de cada uno de los 5 tramos del
+# modelo SIVQRD. Van aca (y no mas abajo, junto a tramos_def) porque sigma
+# (Bloque 2.1) tambien las necesita.
+fecha_aspo       <- as.Date("2020-03-16")   # EDITAR: inicio del ASPO
+fecha_dispo      <- as.Date("2020-06-01")   # EDITAR: inicio del DISPO
+fecha_vacunacion <- as.Date("2020-12-29")   # EDITAR: inicio de la vacunacion
+fecha_omicron    <- as.Date("2021-12-01")   # EDITAR: aparicion de Omicron
 
 # Numero de semana (entero) que CONTIENE una fecha dada, con semana 1 =
 # fecha_inicio_serie. Se usa tanto para agregar los datos diarios a semanal
@@ -67,7 +73,7 @@ datos_owid_semanal <- owid_argentina_diario %>%
     tests_owid               = sum(new_tests, na.rm = TRUE),
     positividad_owid         = mean(positive_rate, na.rm = TRUE),
     vacunados_completos_owid = last(na.omit(people_fully_vaccinated)),
-    poblacion_owid = mean(population, na.rm=T), 
+    poblacion_owid            = mean(population, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   arrange(semana)
@@ -82,44 +88,84 @@ datos_owid_semanal <- owid_argentina_diario %>%
 # a mano: completar cada uno con su fuente bibliografica antes de usar el
 # modelo para resultados finales.
 
-n_poblacion     <- mean(datos_owid_semanal$poblacion_owid)
-s0_frac         <- obtener_parametro(parametros_excel, "Fraccion susceptible inicial (S0/N)")
-i0_personas     <- obtener_parametro(parametros_excel, "Infecciosos iniciales (I0)")
-dias_infecciosos <- obtener_parametro(parametros_excel, "Duracion del periodo infeccioso (D)")
-ifr_base        <- obtener_parametro(parametros_excel, "IFR base pre-vacunacion")
-rezago_semanas  <- obtener_parametro(parametros_excel, "Rezago infeccion -> muerte")
-ve_muerte       <- obtener_parametro(parametros_excel, "Efectividad vacunal contra muerte")
+n_poblacion <- mean(datos_owid_semanal$poblacion_owid)
 
-# Parametros adicionales del SIVQRD: EDITAR con la fuente bibliografica
-# correspondiente antes de usar el modelo para resultados finales.
-theta       <- 0.68   # EDITAR: tasa semanal de entrada a cuarentena de los infectados (I -> Q)
-theta_inicial <- 0.1  # punto de partida para la calibracion (Bloque 3)
-theta_min     <- 0
-theta_max     <- 2
-sigma       <- obtener_parametro(parametros_excel, "Tasa semanal de vacunacion de susceptibles (S -> V)")
-ve_contagio <- obtener_parametro(parametros_excel, "Efectividad vacunal contra el contagio (define beta_v = beta*(1-ve_contagio))")
-dias_infecciosos_vac <- dias_infecciosos  # EDITAR si la literatura da una duracion distinta para Iv
+s0_frac          <- 1       # EDITAR: fraccion susceptible inicial (S0/N)
+i0_personas      <- 100     # EDITAR: infecciosos iniciales (I0)
+dias_infecciosos <- 10      # EDITAR: duracion del periodo infeccioso no vacunado, en dias (D)
+ifr_base         <- 0.006   # EDITAR: IFR base pre-vacunacion
+rezago_semanas   <- 3       # EDITAR: rezago infeccion -> muerte, en semanas
+ve_muerte        <- 0.7     # EDITAR: efectividad vacunal contra la muerte
+
+dias_infecciosos_vac <- dias_infecciosos   # EDITAR si la literatura da una duracion distinta para Iv
+
+# sigma: tasa semanal de vacunacion de susceptibles (S -> V). No es un
+# parametro biologico de la literatura sino el RITMO de la propia campana de
+# vacunacion argentina, asi que se extrae de los datos de OWID en vez de
+# hardcodearse: es el hazard semanal CONSTANTE que, aplicado desde el inicio
+# de la vacunacion (fecha_vacunacion) hasta el final de la serie, reproduce
+# la cobertura de "vacunados completos" finalmente observada. Si
+# V(T)/N = 1 - exp(-sigma*T), con T en semanas desde el inicio de la
+# vacunacion, entonces sigma = -ln(1 - V(T)/N) / T.
+semanas_de_vacunacion <- max(datos_owid_semanal$semana) - semana_de_fecha(fecha_vacunacion)
+cobertura_final_owid  <- tail(na.omit(datos_owid_semanal$vacunados_completos_owid), 1) / n_poblacion
+sigma <- -log(1 - cobertura_final_owid) / semanas_de_vacunacion
+
+# ve_contagio: efectividad vacunal contra el CONTAGIO (no contra la muerte;
+# define beta_v = beta*(1-ve_contagio)). Se construye igual que ve_muerte en
+# el Excel original: promedio ponderado por el mix de vacunas efectivamente
+# aplicadas en Argentina.
+#
+# Odds ratios de infeccion a las 2 dosis, de Rearte A, et al. "Effectiveness
+# of rAd26-rAd5, ChAdOx1 nCoV-19, and BBIBP-CorV vaccines for risk of
+# infection with SARS-CoV-2 and death due to COVID-19 in people older than
+# 60 years in Argentina: a test-negative, case-control, and retrospective
+# longitudinal study". Lancet. 2022;399(10331):1254-1264.
+# https://doi.org/10.1016/S0140-6736(22)00011-3
+#   rAd26-rAd5 (Sputnik V):        OR = 0.36 -> VE = 0.64
+#   ChAdOx1 nCoV-19 (AstraZeneca):  OR = 0.32 -> VE = 0.68
+#   BBIBP-CorV (Sinopharm):         OR = 0.56 -> VE = 0.44
+#
+# Mix de dosis APLICADAS en Argentina a sep-2021, segun Chequeado con datos
+# del Monitor Publico de Vacunacion (AstraZeneca 33%, Sinopharm 32%,
+# Sputnik V 29%, Moderna 5%):
+# https://chequeado.com/hilando-fino/cuales-son-las-vacunas-contra-el-coronavirus-mas-aplicadas-en-la-argentina/
+# Moderna no tiene OR de infeccion en Rearte et al.: se renormalizan los
+# pesos sobre las 3 vacunas con dato (94% del total aplicado a esa fecha).
+ve_infeccion_por_vacuna <- c(sputnik_v = 1 - 0.36, astrazeneca = 1 - 0.32, sinopharm = 1 - 0.56)
+peso_por_vacuna         <- c(sputnik_v = 0.29,     astrazeneca = 0.33,     sinopharm = 0.32)
+peso_por_vacuna         <- peso_por_vacuna / sum(peso_por_vacuna)
+ve_contagio <- sum(ve_infeccion_por_vacuna * peso_por_vacuna)   # ~0.586
+
+# theta (tasa de cuarentena) ya NO se fija a mano: se calibra en el Bloque 3
+# junto con beta (ver proceso iterativo). Aca solo se declara el punto de
+# partida y el rango de busqueda del optimizador.
+theta_inicial <- 0.1   # EDITAR si se quiere otro punto de partida para la calibracion
+theta_min     <- 0     # EDITAR: cota inferior de busqueda de theta
+theta_max     <- 2     # EDITAR: cota superior de busqueda de theta
 
 # gamma y delta se derivan de la tasa de salida total del compartimento I
-# (gamma_total = 7/D, en semanas) partida segun el IFR, igual que hace la
-# planilla (hoja Modelo_SIRD, columna F) pero ahora como dos parametros
-# independientes, tal como los define el modelo SIVQRD (ecuaciones 23-29).
-gamma_total       <- 7 / dias_infecciosos
-delta             <- (ifr_base/(1-ifr_base)) * gamma_total        # tasa de mortalidad de I  (parametro delta, ec. 24 y 29)
-gamma             <- (1 - ifr_base) * gamma_total   # tasa de recuperacion de I (parametro gamma, ec. 24 y 28)
+# (gamma_total = 7/D, en semanas) partida segun el IFR, de forma que ambos
+# queden como los dos parametros independientes que define el modelo SIVQRD
+# (ecuaciones 23-29). Con gamma = (1-IFR)*gamma_total y delta = IFR*gamma_total
+# se cumplen a la vez las dos condiciones que definen a D y al IFR:
+# gamma+delta = gamma_total = 7/D (la duracion total del periodo infeccioso
+# es D) y delta/(gamma+delta) = IFR (la probabilidad de morir, dado que te
+# infectaste, es el IFR). Cualquier otra combinacion que no sea esta rompe
+# una de las dos igualdades.
+gamma_total <- 7 / dias_infecciosos
+delta       <- ifr_base * gamma_total        # tasa de mortalidad de I  (parametro delta, ec. 24 y 29)
+gamma       <- (1 - ifr_base) * gamma_total  # tasa de recuperacion de I (parametro gamma, ec. 24 y 28)
 
-ifr_vacunados     <- ifr_base * (1 - ve_muerte)
-gamma_total_vac   <- 7 / dias_infecciosos_vac
-delta_v           <- (ifr_vacunados/(1-ifr_vacunados)) * gamma_total_vac   # tasa de mortalidad de Iv (ec. 25 y 29)
-gamma_v           <- (1 - ifr_vacunados) * gamma_total_vac  # tasa de recuperacion de Iv (ec. 25 y 28)
+ifr_vacunados   <- ifr_base * (1 - ve_muerte)
+gamma_total_vac <- 7 / dias_infecciosos_vac
+delta_v         <- ifr_vacunados * gamma_total_vac         # tasa de mortalidad de Iv (ec. 25 y 29)
+gamma_v         <- (1 - ifr_vacunados) * gamma_total_vac   # tasa de recuperacion de Iv (ec. 25 y 28)
 
-## 2.2 Fechas de corte de beta (EDITAR ACA) ----------------------------------
-# Definen el inicio de cada uno de los 5 tramos de beta del modelo SIVQRD.
-
-fecha_aspo       <- as.Date("2020-03-16")   # EDITAR: inicio del ASPO
-fecha_dispo      <- as.Date("2020-06-01")   # EDITAR: inicio del DISPO
-fecha_vacunacion <- as.Date("2020-12-29")   # EDITAR: inicio de la vacunacion
-fecha_omicron    <- as.Date("2021-12-01")   # EDITAR: aparicion de Omicron
+## 2.2 Tramos de beta ---------------------------------------------------------
+# Las fechas de corte (fecha_aspo, fecha_dispo, fecha_vacunacion,
+# fecha_omicron) se declaran en el Bloque 0, no aca: sigma (arriba) tambien
+# las necesita.
 
 # cortes_semana[k] = primera semana (entera) del tramo k, en la misma grilla
 # semanal que los datos (ver semana_de_fecha en el Bloque 0).
@@ -211,10 +257,24 @@ estado_inicial <- c(
   iv = 0, v = 0, q = 0, r = 0, d = 0
 )
 
-# Error de ajuste (MSE de log1p, agregacion semanal) de una serie de
-# "emisiones" (muertes nuevas del modelo, antes del rezago) ya simulada,
-# contra las muertes semanales de OWID. Se reutiliza tanto para calibrar beta
-# y theta como para reportar el MSE global en el Bloque 4.
+# Error de ajuste (MSRE, Mean Squared Relative Error, agregacion semanal) de
+# una serie de "emisiones" (muertes nuevas del modelo, antes del rezago) ya
+# simulada, contra las muertes semanales de OWID. Se reutiliza tanto para
+# calibrar beta y theta como para reportar el error global en el Bloque 4.
+#
+# El MSRE se calcula sobre log1p(muertes), no sobre el nivel: el error
+# relativo en NIVEL esta acotado por abajo en -1 (subestimar) pero no tiene
+# techo por arriba (sobreestimar), asi que en una dinamica exponencial como
+# esta el optimizador tiende a elegir beta casi nulo con tal de no arriesgar
+# una sobreestimacion explosiva (se probo: el tramo mas largo terminaba en el
+# piso del rango de busqueda y el modelo caia a ~0 el resto de la serie). El
+# error relativo sobre log1p(.) no tiene esa asimetria y mantiene el espiritu
+# del MSRE (pondera por igual semanas con pocas y con muchas muertes).
+#
+# MSRE = promedio( ((log1p(muertes_modelo) - log1p(muertes_owid)) / log1p(muertes_owid))^2 ).
+# Las semanas con 0 muertes observadas se excluyen (log1p(0) = 0, el error
+# relativo no esta definido ahi); en la serie de Argentina 2020-2022 no hay
+# ninguna, pero se cubre el caso igual.
 #
 # El rezago (dplyr::lag) se calcula SIEMPRE sobre la serie COMPLETA de
 # emisiones recibida (arrange() la ordena primero), para que las primeras
@@ -229,41 +289,11 @@ calcular_error_global <- function(emisiones, semanas_objetivo = NULL) {
   if (!is.null(semanas_objetivo)) {
     comparacion <- comparacion %>% filter(semana %in% semanas_objetivo)
   }
-  mean((log1p(comparacion$muertes_comparables) - log1p(comparacion$muertes_owid))^2, na.rm = TRUE)
-}
-
-estado_actual  <- estado_inicial
-emisiones_global <- tibble(semana = numeric(), muertes_emitidas = numeric())
-resultados_sim   <- list()
-betas_ajustados  <- numeric(nrow(tramos_def))
-
-for (k in seq_len(nrow(tramos_def))) {
-
-  semana_ini_k  <- tramos_def$semana_ini[k]
-  semana_fin_k  <- tramos_def$semana_fin[k]
-  semanas_tramo <- seq(semana_ini_k, semana_fin_k, by = 1)
-
-  calcular_error_tramo <- function(beta_k) {
-    sim <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, beta_k, parametros_fijos)
-
-    # Muertes nuevas emitidas por el modelo en la semana w = incremento del
-    # compartimento d (acumulado) entre el inicio de w y el inicio de w+1,
-    # multiplicado por la poblacion. sim tiene semana_fin_k - semana_ini_k + 2
-    # filas (incluye el punto extra al final), por eso diff() da exactamente
-    # un valor por cada semana de semanas_tramo.
-    muertes_nuevas <- diff(sim$d) * n_poblacion
-    emisiones_candidatas <- tibble(semana = semanas_tramo, muertes_emitidas = muertes_nuevas)
-
-    emisiones_comparables <- bind_rows(emisiones_global, emisiones_candidatas) %>%
-      arrange(semana) %>%
-      mutate(muertes_comparables = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
-      filter(semana %in% semanas_tramo) %>%
-      left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana")
-
-    mean((log1p(emisiones_comparables$muertes_comparables) - log1p(emisiones_comparables$muertes_owid))^2, na.rm = TRUE)
-  }
-  }
-  mean((log1p(comparacion$muertes_comparables) - log1p(comparacion$muertes_owid))^2, na.rm = TRUE)
+  log_modelo <- log1p(comparacion$muertes_comparables)
+  log_owid   <- log1p(comparacion$muertes_owid)
+  error_relativo <- (log_modelo - log_owid) / log_owid
+  error_relativo[comparacion$muertes_owid == 0] <- NA
+  mean(error_relativo^2, na.rm = TRUE)
 }
 
 # (A) Ajusta los 5 beta de forma secuencial por tramo, para un theta fijo:
@@ -440,6 +470,9 @@ mse_global <- {
     mutate(muertes_comparables = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
     left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana")
   tibble(
+    # msre es la funcion de perdida que efectivamente se minimizo (debe
+    # coincidir con mejor_error). mse_nivel y mse_log son solo diagnostico.
+    msre      = calcular_error_global(emisiones_global),
     mse_nivel = mean((comparacion_global$muertes_comparables - comparacion_global$muertes_owid)^2, na.rm = TRUE),
     mse_log   = mean((log1p(comparacion_global$muertes_comparables) - log1p(comparacion_global$muertes_owid))^2, na.rm = TRUE)
   )
