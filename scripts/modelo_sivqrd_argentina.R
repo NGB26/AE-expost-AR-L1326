@@ -2,90 +2,51 @@
 # MODELO EPIDEMIOLOGICO SIVQRD - ARGENTINA COVID-19
 # Insumo para el analisis economico ex post del PCR AR-L1326 (BID)
 #
-# Adapta el libro "SIRD_Argentina_PCR.xlsx" (modelo SIRD simple, ajuste semanal
-# por formulas de planilla) a un modelo SIVQRD completo, resuelto e integrado
-# en R. Las ecuaciones siguen la numeracion de "Modelo_SIR_para_PCR.docx".
+# Implementa en R el modelo SIVQRD descrito en "Modelo_SIR_para_PCR.docx"
+# (ecuaciones 23-29). Ya no depende del Excel "SIRD_Argentina_PCR.xlsx": los
+# parametros biologicos y las fechas de corte de beta se declaran a mano en
+# este mismo script (Bloque 2.1 y 2.2), y la unica fuente de datos externa es
+# OWID (de ahi tambien se toma la poblacion N).
 #
-# Fuente de calibracion: muertes semanales de Our World in Data (OWID), igual
-# que en la planilla original. La serie oficial de datos.gob.ar se importa
-# como serie de contraste/validacion (no interviene en el ajuste de beta).
+# Fuente de calibracion: muertes semanales de Our World in Data (OWID).
 #
-# Metodo de ajuste: secuencial por tramo. Para cada uno de los 5 tramos de
-# beta se corre el modelo con el estado final del tramo anterior como
-# condicion inicial, y se busca el beta que minimiza el error dentro de ESE
-# tramo unicamente. Los parametros restantes (gamma, delta, theta, sigma,
-# beta_v, gamma_v, delta_v) son fijos y no se calibran.
+# Metodo de ajuste: proceso ITERATIVO de dos pasos (Bloque 3).
+#   (A) Con theta fijo, se ajustan los 5 beta de forma secuencial por tramo:
+#       cada beta minimiza el error dentro de SU tramo unicamente, usando el
+#       estado final del tramo anterior como condicion inicial.
+#   (B) Con esos 5 beta ya fijos, se ajusta theta (un unico valor para toda
+#       la serie) para minimizar el error GLOBAL.
+# (A) y (B) se repiten hasta que el error global deje de mejorar (o se
+# alcance el maximo de iteraciones). Los demas parametros (gamma, delta,
+# sigma, beta_v, gamma_v, delta_v) son fijos y no se calibran.
 #
-# FUNCION DE PERDIDA: MSE(log1p(muertes modelo), log1p(muertes OWID)) sobre
-# la agregacion semanal. El MSE en nivel se sigue reportando en el Bloque 4
-# como diagnostico, pero no interviene en el ajuste de beta.
-#
-# NOTA SOBRE DATOS.GOB.AR: esta sesion no tuvo acceso de red al host
-# datos.gob.ar para confirmar en vivo los nombres de columnas del dataset
-# "Casos registrados de COVID-19 en la Republica Argentina"
-# (https://www.datos.gob.ar/dataset/salud-covid-19-casos-registrados-republica-argentina).
-# Los nombres usados abajo (clasificacion_resumen, fecha_apertura,
-# fecha_fallecimiento, fallecido) son los del diccionario de datos publicado
-# historicamente por el Ministerio de Salud para ese dataset; verificar contra
-# el diccionario vigente antes de la primera corrida.
+# FUNCION DE PERDIDA: MSE(log1p(muertes modelo con rezago), log1p(muertes
+# OWID)) sobre la agregacion semanal (no diaria), tanto para beta como para
+# theta.
 # ============================================================================
 
 library(tidyverse)   # dplyr, tidyr, purrr, ggplot2
-library(readxl)      # lectura de Parametros y Tramos_Beta desde el Excel
 library(lubridate)   # manejo de fechas
 library(deSolve)     # integracion numerica de las ecuaciones diferenciales
 library(scales)      # formato de ejes en los graficos
 
 # ----------------------------------------------------------------------------
-# BLOQUE 0 - RUTAS Y CONSTANTES DE SERIE
+# BLOQUE 0 - CONSTANTES DE SERIE
 # ----------------------------------------------------------------------------
 
 ruta_excel_parametros <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Project Completition Reports/AR-L1326/PCR/Análisis Económico/AE expost AR-L1326/data/raw/SIRD_Argentina_PCR.xlsx"
 
 fecha_inicio_serie <- as.Date("2020-03-08")   # semana 1, igual que Datos_OWID
-fecha_fin_serie    <- as.Date("2022-06-05")   # ultima semana cubierta por el Excel
+fecha_fin_serie    <- as.Date("2022-06-05")   # ultima semana de la serie
 
 # Numero de semana (entero) que CONTIENE una fecha dada, con semana 1 =
 # fecha_inicio_serie. Se usa tanto para agregar los datos diarios a semanal
-# como para ubicar las fechas de quiebre de politica dentro de esa misma
-# grilla semanal (mismo criterio que la columna "Semana ini" de Tramos_Beta).
+# como para ubicar las fechas de corte de beta dentro de esa misma grilla.
 semana_de_fecha <- function(fecha) as.integer(floor(as.numeric(fecha - fecha_inicio_serie) / 7)) + 1L
 
 # ----------------------------------------------------------------------------
-# BLOQUE 1 - IMPORTACION DE DATOS
+# BLOQUE 1 - IMPORTACION DE DATOS (OWID)
 # ----------------------------------------------------------------------------
-
-## 1.1 Parametros fijos y fechas de tramo, leidos desde el Excel adjunto -----
-# Se lee por ETIQUETA (no por celda fija) para poder seguir editando el Excel
-# sin romper el script, igual que el libro original invita a hacer en la hoja
-# "Parametros" ("AQUI se edita").
-
-obtener_parametro <- function(tabla, etiqueta) {
-  fila <- tabla %>% filter(parametro == etiqueta)
-  if (nrow(fila) != 1) {
-    stop(sprintf("Parametro '%s' no encontrado o ambiguo (%d coincidencias) en la hoja Parametros.",
-                  etiqueta, nrow(fila)))
-  }
-  fila$valor[[1]]
-}
-
-parametros_excel <- read_excel(ruta_excel_parametros, sheet = "Parametros", range = "B4:G30") %>%
-  set_names(c("parametro", "valor", "min", "max", "unidad", "fuente")) %>%
-  filter(!is.na(valor))
-
-tramos_excel <- read_excel(ruta_excel_parametros, sheet = "Tramos_Beta", range = "B5:I14") %>%
-  set_names(c("id", "hito", "fecha_inicio", "semana_ini", "semana_fin", "beta_excel", "r0_excel", "fuente"))
-
-# Fechas de quiebre de politica: ASPO, DISPO, inicio de vacunacion y Omicron.
-# Son las mismas 4 fechas que ya estan documentadas en Tramos_Beta; aqui se
-# usan para construir los 5 TRAMOS DE BETA del modelo SIVQRD (en vez de los 9
-# tramos de la planilla original).
-fecha_aspo       <- tramos_excel %>% filter(hito == "Cierre fronteras + ASPO (Dto 297/20)") %>% pull(fecha_inicio) %>% as.Date()
-fecha_dispo      <- tramos_excel %>% filter(hito == "DISPO / flexibilizacion") %>% pull(fecha_inicio) %>% as.Date()
-fecha_vacunacion <- tramos_excel %>% filter(hito == "Inicio vacunacion") %>% pull(fecha_inicio) %>% as.Date()
-fecha_omicron    <- tramos_excel %>% filter(hito == "Omicron") %>% pull(fecha_inicio) %>% as.Date()
-
-## 1.2 Our World in Data (OWID) - serie de calibracion ----------------------
 # Archivo historico completo (congelado; Argentina dejo de reportar en 2022).
 # https://github.com/owid/covid-19-data/blob/master/public/data/owid-covid-data.csv
 
@@ -100,28 +61,26 @@ owid_argentina_diario <- read_csv(url_owid, show_col_types = FALSE) %>%
 datos_owid_semanal <- owid_argentina_diario %>%
   group_by(semana) %>%
   summarise(
-    fecha                   = min(date),
+    fecha                    = min(date),
     casos_owid               = sum(new_cases, na.rm = TRUE),
     muertes_owid             = sum(new_deaths, na.rm = TRUE),
-    tests_owid                = sum(new_tests, na.rm = TRUE),
-    positividad_owid          = mean(positive_rate, na.rm = TRUE),
+    tests_owid               = sum(new_tests, na.rm = TRUE),
+    positividad_owid         = mean(positive_rate, na.rm = TRUE),
     vacunados_completos_owid = last(na.omit(people_fully_vaccinated)),
     poblacion_owid = mean(population, na.rm=T), 
     .groups = "drop"
   ) %>%
   arrange(semana)
 
-
 # ----------------------------------------------------------------------------
 # BLOQUE 2 - FUNCIONES Y MODELO SIVQRD (ecuaciones diferenciales)
 # ----------------------------------------------------------------------------
 
-## 2.1 Parametros fijos del modelo -------------------------------------------
-# N, S0/N, I0, duracion infecciosa e IFR vienen del Excel. theta, sigma,
-# beta_v (via ve_contagio), gamma_v y delta_v no estan en el Excel original
-# (el modelo SIRD simple no los usa): quedan como constantes "a completar con
-# la literatura", exactamente como las demas filas en blanco de la hoja
-# Parametros. NO son valores calibrados.
+## 2.1 Parametros del modelo (EDITAR ACA) ------------------------------------
+# N se extrae de los datos de OWID (columna "population", constante en toda
+# la serie). El resto de los parametros biologicos y de atribucion se declara
+# a mano: completar cada uno con su fuente bibliografica antes de usar el
+# modelo para resultados finales.
 
 n_poblacion     <- mean(datos_owid_semanal$poblacion_owid)
 s0_frac         <- obtener_parametro(parametros_excel, "Fraccion susceptible inicial (S0/N)")
@@ -134,8 +93,11 @@ ve_muerte       <- obtener_parametro(parametros_excel, "Efectividad vacunal cont
 # Parametros adicionales del SIVQRD: EDITAR con la fuente bibliografica
 # correspondiente antes de usar el modelo para resultados finales.
 theta       <- 0.68   # EDITAR: tasa semanal de entrada a cuarentena de los infectados (I -> Q)
-sigma       <- 0.0005   # EDITAR: tasa semanal de vacunacion de susceptibles (S -> V)
-ve_contagio <- 0.5   # EDITAR: efectividad vacunal contra el contagio (define beta_v = beta*(1-ve_contagio))
+theta_inicial <- 0.1  # punto de partida para la calibracion (Bloque 3)
+theta_min     <- 0
+theta_max     <- 2
+sigma       <- obtener_parametro(parametros_excel, "Tasa semanal de vacunacion de susceptibles (S -> V)")
+ve_contagio <- obtener_parametro(parametros_excel, "Efectividad vacunal contra el contagio (define beta_v = beta*(1-ve_contagio))")
 dias_infecciosos_vac <- dias_infecciosos  # EDITAR si la literatura da una duracion distinta para Iv
 
 # gamma y delta se derivan de la tasa de salida total del compartimento I
@@ -151,10 +113,16 @@ gamma_total_vac   <- 7 / dias_infecciosos_vac
 delta_v           <- (ifr_vacunados/(1-ifr_vacunados)) * gamma_total_vac   # tasa de mortalidad de Iv (ec. 25 y 29)
 gamma_v           <- (1 - ifr_vacunados) * gamma_total_vac  # tasa de recuperacion de Iv (ec. 25 y 28)
 
-## 2.2 Tramos de beta (5 tramos, segun hitos de politica) -------------------
-# semana_de_fecha() ya esta definida en el Bloque 0 (misma grilla semanal que
-# los datos). cortes_semana[k] = primera semana (entera) del tramo k.
+## 2.2 Fechas de corte de beta (EDITAR ACA) ----------------------------------
+# Definen el inicio de cada uno de los 5 tramos de beta del modelo SIVQRD.
 
+fecha_aspo       <- as.Date("2020-03-16")   # EDITAR: inicio del ASPO
+fecha_dispo      <- as.Date("2020-06-01")   # EDITAR: inicio del DISPO
+fecha_vacunacion <- as.Date("2020-12-29")   # EDITAR: inicio de la vacunacion
+fecha_omicron    <- as.Date("2021-12-01")   # EDITAR: aparicion de Omicron
+
+# cortes_semana[k] = primera semana (entera) del tramo k, en la misma grilla
+# semanal que los datos (ver semana_de_fecha en el Bloque 0).
 cortes_semana <- c(1,
                     semana_de_fecha(fecha_aspo),
                     semana_de_fecha(fecha_dispo),
@@ -198,12 +166,17 @@ derivadas_sivqrd <- function(t, estado, parametros) {
 
 ## 2.4 Simulacion de un tramo con beta constante -----------------------------
 
-parametros_fijos <- list(
-  theta = theta, sigma = sigma, ve_contagio = ve_contagio,
-  gamma = gamma, delta = delta, gamma_v = gamma_v, delta_v = delta_v,
-  semana_inicio_aspo = semana_de_fecha(fecha_aspo),
-  semana_inicio_vacunacion = semana_de_fecha(fecha_vacunacion)
-)
+# Arma la lista de parametros fijos para un theta dado (el resto no cambia
+# durante la calibracion). Se usa tanto para ajustar beta (theta fijo) como
+# para ajustar theta (beta fijo) en el Bloque 3.
+construir_parametros_fijos <- function(theta_valor) {
+  list(
+    theta = theta_valor, sigma = sigma, ve_contagio = ve_contagio,
+    gamma = gamma, delta = delta, gamma_v = gamma_v, delta_v = delta_v,
+    semana_inicio_aspo = semana_de_fecha(fecha_aspo),
+    semana_inicio_vacunacion = semana_de_fecha(fecha_vacunacion)
+  )
+}
 
 simular_tramo <- function(estado_inicial, semana_ini, semana_fin, beta_valor, parametros_fijos) {
   # Se pide un punto extra al final (semana_fin + 1): representa el estado al
@@ -229,20 +202,35 @@ calcular_re <- function(beta_valor, theta_valor, s_prom, v_prom) {
 }
 
 # ----------------------------------------------------------------------------
-# BLOQUE 3 - AJUSTE Y CALIBRACION DEL MODELO
+# BLOQUE 3 - AJUSTE Y CALIBRACION DEL MODELO (proceso iterativo beta <-> theta)
 # ----------------------------------------------------------------------------
-# Variable de ajuste: beta, un valor por tramo (5 en total). El resto de los
-# parametros es fijo (Bloque 2). Objetivo por tramo: minimizar
-#   MSE(log1p(muertes modelo con rezago), log1p(muertes OWID))
-# sobre la agregacion SEMANAL (no diaria). El ajuste es secuencial: beta_1 se
-# fija usando solo las semanas del tramo 1; el estado final de ese tramo pasa
-# como condicion inicial del tramo 2, y asi sucesivamente.
 
 estado_inicial <- c(
   s = s0_frac - i0_personas / n_poblacion,
   i = i0_personas / n_poblacion,
   iv = 0, v = 0, q = 0, r = 0, d = 0
 )
+
+# Error de ajuste (MSE de log1p, agregacion semanal) de una serie de
+# "emisiones" (muertes nuevas del modelo, antes del rezago) ya simulada,
+# contra las muertes semanales de OWID. Se reutiliza tanto para calibrar beta
+# y theta como para reportar el MSE global en el Bloque 4.
+#
+# El rezago (dplyr::lag) se calcula SIEMPRE sobre la serie COMPLETA de
+# emisiones recibida (arrange() la ordena primero), para que las primeras
+# semanas de un tramo tomen el rezago del historial de emisiones de los
+# tramos anteriores. semanas_objetivo filtra DESPUES de aplicar el rezago, no
+# antes, para no perder ese historial al pedir el error de un tramo puntual.
+calcular_error_global <- function(emisiones, semanas_objetivo = NULL) {
+  comparacion <- emisiones %>%
+    arrange(semana) %>%
+    mutate(muertes_comparables = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
+    left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana")
+  if (!is.null(semanas_objetivo)) {
+    comparacion <- comparacion %>% filter(semana %in% semanas_objetivo)
+  }
+  mean((log1p(comparacion$muertes_comparables) - log1p(comparacion$muertes_owid))^2, na.rm = TRUE)
+}
 
 estado_actual  <- estado_inicial
 emisiones_global <- tibble(semana = numeric(), muertes_emitidas = numeric())
@@ -274,29 +262,144 @@ for (k in seq_len(nrow(tramos_def))) {
 
     mean((log1p(emisiones_comparables$muertes_comparables) - log1p(emisiones_comparables$muertes_owid))^2, na.rm = TRUE)
   }
-
-  ajuste <- optimize(calcular_error_tramo, interval = c(0.01, 2), tol = 1e-5)
-  betas_ajustados[k] <- ajuste$minimum
-
-  sim_final <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, betas_ajustados[k], parametros_fijos)
-  muertes_nuevas_final <- diff(sim_final$d) * n_poblacion
-
-  emisiones_global <- bind_rows(emisiones_global, tibble(semana = semanas_tramo, muertes_emitidas = muertes_nuevas_final)) %>%
-    arrange(semana)
-
-  # Se descarta el punto extra (semana_fin_k + 1) de los resultados que se
-  # grafican: es solo el estado inicial del tramo siguiente.
-  resultados_sim[[k]] <- sim_final %>%
-    filter(semana <= semana_fin_k) %>%
-    mutate(tramo = k, nombre_tramo = tramos_def$nombre[k])
-
-  estado_actual <- sim_final %>%
-    slice_tail(n = 1) %>%
-    select(s, i, iv, v, q, r, d) %>%
-    unlist()
+  }
+  mean((log1p(comparacion$muertes_comparables) - log1p(comparacion$muertes_owid))^2, na.rm = TRUE)
 }
 
-simulacion_completa <- bind_rows(resultados_sim)
+# (A) Ajusta los 5 beta de forma secuencial por tramo, para un theta fijo:
+# cada beta minimiza el error DENTRO de su propio tramo, usando el estado
+# final del tramo anterior como condicion inicial del siguiente.
+ajustar_betas <- function(theta_valor) {
+  parametros_fijos <- construir_parametros_fijos(theta_valor)
+  estado_actual     <- estado_inicial
+  emisiones         <- tibble(semana = numeric(), muertes_emitidas = numeric())
+  resultados_sim    <- list()
+  betas_ajustados   <- numeric(nrow(tramos_def))
+
+  for (k in seq_len(nrow(tramos_def))) {
+
+    semana_ini_k  <- tramos_def$semana_ini[k]
+    semana_fin_k  <- tramos_def$semana_fin[k]
+    semanas_tramo <- seq(semana_ini_k, semana_fin_k, by = 1)
+
+    calcular_error_tramo <- function(beta_k) {
+      sim <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, beta_k, parametros_fijos)
+      muertes_nuevas <- diff(sim$d) * n_poblacion
+      emisiones_candidatas <- tibble(semana = semanas_tramo, muertes_emitidas = muertes_nuevas)
+      calcular_error_global(bind_rows(emisiones, emisiones_candidatas), semanas_objetivo = semanas_tramo)
+    }
+
+    ajuste <- optimize(calcular_error_tramo, interval = c(0.01, 2), tol = 1e-5)
+    betas_ajustados[k] <- ajuste$minimum
+
+    sim_final <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, betas_ajustados[k], parametros_fijos)
+    muertes_nuevas_final <- diff(sim_final$d) * n_poblacion
+
+    emisiones <- bind_rows(emisiones, tibble(semana = semanas_tramo, muertes_emitidas = muertes_nuevas_final)) %>%
+      arrange(semana)
+
+    # Se descarta el punto extra (semana_fin_k + 1): es solo el estado
+    # inicial del tramo siguiente, no una semana propia de este tramo.
+    resultados_sim[[k]] <- sim_final %>%
+      filter(semana <= semana_fin_k) %>%
+      mutate(tramo = k, nombre_tramo = tramos_def$nombre[k])
+
+    estado_actual <- sim_final %>%
+      slice_tail(n = 1) %>%
+      select(s, i, iv, v, q, r, d) %>%
+      unlist()
+  }
+
+  list(betas = betas_ajustados, emisiones = emisiones, simulacion = bind_rows(resultados_sim))
+}
+
+# (B) Para un vector de beta YA fijo, corre la serie completa con un theta
+# dado y devuelve su error global. Se usa para calibrar theta en el paso (B).
+evaluar_theta <- function(theta_candidato, betas_fijos) {
+  calcular_error_global(ajustar_betas_con_beta_fijo(theta_candidato, betas_fijos)$emisiones)
+}
+
+# Corre la serie completa (los 5 tramos, uno atras del otro) con un vector de
+# beta ya fijo (sin optimizar) y un theta dado. Es la contraparte de
+# ajustar_betas() cuando lo que se quiere variar es theta, no beta.
+ajustar_betas_con_beta_fijo <- function(theta_valor, betas_fijos) {
+  parametros_fijos <- construir_parametros_fijos(theta_valor)
+  estado_actual     <- estado_inicial
+  emisiones         <- tibble(semana = numeric(), muertes_emitidas = numeric())
+  resultados_sim    <- list()
+
+  for (k in seq_len(nrow(tramos_def))) {
+    semana_ini_k  <- tramos_def$semana_ini[k]
+    semana_fin_k  <- tramos_def$semana_fin[k]
+    semanas_tramo <- seq(semana_ini_k, semana_fin_k, by = 1)
+
+    sim <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, betas_fijos[k], parametros_fijos)
+    muertes_nuevas <- diff(sim$d) * n_poblacion
+
+    emisiones <- bind_rows(emisiones, tibble(semana = semanas_tramo, muertes_emitidas = muertes_nuevas)) %>%
+      arrange(semana)
+
+    resultados_sim[[k]] <- sim %>%
+      filter(semana <= semana_fin_k) %>%
+      mutate(tramo = k, nombre_tramo = tramos_def$nombre[k])
+
+    estado_actual <- sim %>% slice_tail(n = 1) %>% select(s, i, iv, v, q, r, d) %>% unlist()
+  }
+
+  list(emisiones = emisiones, simulacion = bind_rows(resultados_sim))
+}
+
+# Proceso iterativo: (A) ajustar beta -> (B) ajustar theta -> (A) volver a
+# ajustar beta -> ... hasta que el error global deje de mejorar.
+#
+# (A) minimiza el error DENTRO DE CADA TRAMO y (B) minimiza el error GLOBAL:
+# son dos objetivos distintos, asi que alternar entre ambos no garantiza que
+# cada pasada mejore el ajuste global (puede quedar mejor por tramo y peor en
+# conjunto). Por eso se guarda el mejor par (beta, theta) visto hasta ahora
+# segun el error global, y el proceso corta apenas una pasada deja de
+# mejorarlo (con la tolerancia de convergencia definida abajo) en vez de
+# quedarse con el resultado de la ultima iteracion sin mas.
+max_iteraciones_externas <- 5      # EDITAR si se quieren mas/menos pasadas
+tolerancia_convergencia  <- 1e-6
+
+theta_actual     <- theta_inicial
+mejor_theta      <- theta_inicial
+mejor_betas      <- NULL
+mejor_error      <- Inf
+historial_ajuste <- tibble(iteracion = integer(), theta = double(), error_global = double())
+
+for (iteracion in seq_len(max_iteraciones_externas)) {
+
+  ajuste_beta    <- ajustar_betas(theta_actual)          # (A) beta con theta fijo
+  betas_actuales <- ajuste_beta$betas
+
+  ajuste_theta <- optimize(
+    evaluar_theta, interval = c(theta_min, theta_max), tol = 1e-4,
+    betas_fijos = betas_actuales
+  )                                                       # (B) theta con beta fijo
+
+  historial_ajuste <- bind_rows(historial_ajuste, tibble(
+    iteracion = iteracion, theta = ajuste_theta$minimum, error_global = ajuste_theta$objective
+  ))
+
+  if (ajuste_theta$objective < mejor_error - tolerancia_convergencia) {
+    mejor_error  <- ajuste_theta$objective
+    mejor_theta  <- ajuste_theta$minimum
+    mejor_betas  <- betas_actuales
+    theta_actual <- ajuste_theta$minimum
+  } else {
+    break
+  }
+}
+
+# Se recalcula la simulacion final con el mejor par (beta, theta) encontrado
+# (sin volver a optimizar beta), para que quede exactamente consistente con
+# mejor_error y con lo que se reporta en el Bloque 4.
+ajuste_final        <- ajustar_betas_con_beta_fijo(mejor_theta, mejor_betas)
+betas_ajustados      <- mejor_betas
+emisiones_global     <- ajuste_final$emisiones
+simulacion_completa  <- ajuste_final$simulacion
+theta                <- mejor_theta   # valor final de theta, ya calibrado
 
 # ----------------------------------------------------------------------------
 # BLOQUE 4 - RESULTADOS DEL MODELO
@@ -342,6 +445,8 @@ mse_global <- {
   )
 }
 
+cat("Theta calibrado:", theta, " (punto de partida:", theta_inicial, ")\n")
+print(historial_ajuste)
 print(resumen_tramos)
 print(mse_global)
 
