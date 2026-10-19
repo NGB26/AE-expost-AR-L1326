@@ -2,3 +2,12 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Cache local de OWID (regenerable; ver R/data.R). No se versiona por tamano
+# y porque data/cache/*.meta.json ya deja trazabilidad de que se descargo.
+data/cache/
+
+# Resultados de scripts/run.R: regenerables, no se versionan (pesan y
+# cambian en cada corrida). Mantener el directorio con un .gitkeep.
+outputs/*
+!outputs/.gitkeep
