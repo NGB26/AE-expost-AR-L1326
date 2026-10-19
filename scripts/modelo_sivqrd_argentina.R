@@ -16,13 +16,9 @@
 # tramo unicamente. Los parametros restantes (gamma, delta, theta, sigma,
 # beta_v, gamma_v, delta_v) son fijos y no se calibran.
 #
-# OJO CON LA ESCALA DEL OBJETIVO: el objetivo de cada tramo es la SUMA de
-# MSE(nivel) + MSE(log1p), tal como se pidio. En la prueba de este script,
-# MSE(nivel) da ordenes de magnitud mas grande que MSE(log1p) (miles de
-# muertes^2 vs. unidades), por lo que la suma esta dominada casi por completo
-# por el termino en nivel. Si se quiere que ambos componentes pesen de forma
-# comparable, estandarizar cada termino (p.ej. dividiendo por su propia
-# varianza o por el maximo observado) antes de sumarlos.
+# FUNCION DE PERDIDA: MSE(log1p(muertes modelo), log1p(muertes OWID)) sobre
+# la agregacion semanal. El MSE en nivel se sigue reportando en el Bloque 4
+# como diagnostico, pero no interviene en el ajuste de beta.
 #
 # NOTA SOBRE DATOS.GOB.AR: esta sesion no tuvo acceso de red al host
 # datos.gob.ar para confirmar en vivo los nombres de columnas del dataset
@@ -285,7 +281,7 @@ calcular_re <- function(beta_valor, theta_valor, s_prom, v_prom) {
 # ----------------------------------------------------------------------------
 # Variable de ajuste: beta, un valor por tramo (5 en total). El resto de los
 # parametros es fijo (Bloque 2). Objetivo por tramo: minimizar
-#   MSE(muertes modelo con rezago, muertes OWID) + MSE(log1p(.), log1p(.))
+#   MSE(log1p(muertes modelo con rezago), log1p(muertes OWID))
 # sobre la agregacion SEMANAL (no diaria). El ajuste es secuencial: beta_1 se
 # fija usando solo las semanas del tramo 1; el estado final de ese tramo pasa
 # como condicion inicial del tramo 2, y asi sucesivamente.
@@ -324,9 +320,7 @@ for (k in seq_len(nrow(tramos_def))) {
       filter(semana %in% semanas_tramo) %>%
       left_join(datos_semanales %>% select(semana, muertes_owid), by = "semana")
 
-    mse_nivel <- mean((emisiones_comparables$muertes_comparables - emisiones_comparables$muertes_owid)^2, na.rm = TRUE)
-    mse_log   <- mean((log1p(emisiones_comparables$muertes_comparables) - log1p(emisiones_comparables$muertes_owid))^2, na.rm = TRUE)
-    mse_nivel + mse_log
+    mean((log1p(emisiones_comparables$muertes_comparables) - log1p(emisiones_comparables$muertes_owid))^2, na.rm = TRUE)
   }
 
   ajuste <- optimize(calcular_error_tramo, interval = c(0.01, 2), tol = 1e-5)
