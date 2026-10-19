@@ -40,7 +40,7 @@ library(scales)      # formato de ejes en los graficos
 # BLOQUE 0 - RUTAS Y CONSTANTES DE SERIE
 # ----------------------------------------------------------------------------
 
-ruta_excel_parametros <- "data/raw/SIRD_Argentina_PCR.xlsx"
+ruta_excel_parametros <- "C:/Users/NICOLASGA/OneDrive - Inter-American Development Bank Group/General - SCL_SPH_SPH_CAR/Project Completition Reports/AR-L1326/PCR/Análisis Económico/AE expost AR-L1326/data/raw/SIRD_Argentina_PCR.xlsx"
 
 fecha_inicio_serie <- as.Date("2020-03-08")   # semana 1, igual que Datos_OWID
 fecha_fin_serie    <- as.Date("2022-06-05")   # ultima semana cubierta por el Excel
@@ -106,59 +106,11 @@ datos_owid_semanal <- owid_argentina_diario %>%
     tests_owid                = sum(new_tests, na.rm = TRUE),
     positividad_owid          = mean(positive_rate, na.rm = TRUE),
     vacunados_completos_owid = last(na.omit(people_fully_vaccinated)),
+    poblacion_owid = mean(population, na.rm=T), 
     .groups = "drop"
   ) %>%
   arrange(semana)
 
-## 1.3 datos.gob.ar - serie oficial argentina, para contraste ---------------
-# Dataset: "Casos registrados de COVID-19 en la Republica Argentina"
-# https://www.datos.gob.ar/dataset/salud-covid-19-casos-registrados-republica-argentina
-# Se usa la API CKAN para resolver la URL del recurso vigente en lugar de un
-# link fijo, porque la planilla original advierte que la frecuencia y el
-# nombre del archivo cambiaron durante la pandemia.
-
-url_api_dataset <- "https://datos.gob.ar/api/3/action/package_show?id=salud-covid-19-casos-registrados-republica-argentina"
-
-resolver_url_recurso_datos_gob_ar <- function() {
-  metadata <- jsonlite::fromJSON(url_api_dataset)
-  recursos <- metadata$result$resources
-  # Se prioriza el recurso identificado como archivo historico de "Casos".
-  candidato <- recursos %>%
-    as_tibble() %>%
-    filter(str_detect(tolower(name), "caso")) %>%
-    slice(1)
-  candidato$url
-}
-
-url_datos_gob_ar <- resolver_url_recurso_datos_gob_ar()
-
-datos_argentina_oficial_diario <- read_csv(
-  url_datos_gob_ar,
-  col_select = c(clasificacion_resumen, fecha_apertura, fallecido, fecha_fallecimiento),
-  show_col_types = FALSE,
-  locale = locale(encoding = "UTF-8")
-) %>%
-  filter(clasificacion_resumen == "Confirmado")
-
-casos_oficial_semanal <- datos_argentina_oficial_diario %>%
-  mutate(fecha_apertura = as.Date(fecha_apertura)) %>%
-  filter(fecha_apertura >= fecha_inicio_serie, fecha_apertura <= fecha_fin_serie) %>%
-  mutate(semana = semana_de_fecha(fecha_apertura)) %>%
-  count(semana, name = "casos_oficial_ar")
-
-muertes_oficial_semanal <- datos_argentina_oficial_diario %>%
-  filter(fallecido == "SI") %>%
-  mutate(fecha_fallecimiento = as.Date(fecha_fallecimiento)) %>%
-  filter(fecha_fallecimiento >= fecha_inicio_serie, fecha_fallecimiento <= fecha_fin_serie) %>%
-  mutate(semana = semana_de_fecha(fecha_fallecimiento)) %>%
-  count(semana, name = "muertes_oficial_ar")
-
-## 1.4 Serie semanal unica, para calibracion y grafico de contraste ---------
-
-datos_semanales <- datos_owid_semanal %>%
-  left_join(casos_oficial_semanal, by = "semana") %>%
-  left_join(muertes_oficial_semanal, by = "semana") %>%
-  mutate(across(c(casos_oficial_ar, muertes_oficial_ar), ~ replace_na(.x, 0)))
 
 # ----------------------------------------------------------------------------
 # BLOQUE 2 - FUNCIONES Y MODELO SIVQRD (ecuaciones diferenciales)
@@ -171,7 +123,7 @@ datos_semanales <- datos_owid_semanal %>%
 # la literatura", exactamente como las demas filas en blanco de la hoja
 # Parametros. NO son valores calibrados.
 
-n_poblacion     <- obtener_parametro(parametros_excel, "Poblacion Argentina (N)")
+n_poblacion     <- mean(datos_owid_semanal$poblacion_owid)
 s0_frac         <- obtener_parametro(parametros_excel, "Fraccion susceptible inicial (S0/N)")
 i0_personas     <- obtener_parametro(parametros_excel, "Infecciosos iniciales (I0)")
 dias_infecciosos <- obtener_parametro(parametros_excel, "Duracion del periodo infeccioso (D)")
@@ -181,9 +133,9 @@ ve_muerte       <- obtener_parametro(parametros_excel, "Efectividad vacunal cont
 
 # Parametros adicionales del SIVQRD: EDITAR con la fuente bibliografica
 # correspondiente antes de usar el modelo para resultados finales.
-theta       <- NA_real_   # EDITAR: tasa semanal de entrada a cuarentena de los infectados (I -> Q)
-sigma       <- NA_real_   # EDITAR: tasa semanal de vacunacion de susceptibles (S -> V)
-ve_contagio <- NA_real_   # EDITAR: efectividad vacunal contra el contagio (define beta_v = beta*(1-ve_contagio))
+theta       <- 0.68   # EDITAR: tasa semanal de entrada a cuarentena de los infectados (I -> Q)
+sigma       <- 0.0005   # EDITAR: tasa semanal de vacunacion de susceptibles (S -> V)
+ve_contagio <- 0.5   # EDITAR: efectividad vacunal contra el contagio (define beta_v = beta*(1-ve_contagio))
 dias_infecciosos_vac <- dias_infecciosos  # EDITAR si la literatura da una duracion distinta para Iv
 
 # gamma y delta se derivan de la tasa de salida total del compartimento I
@@ -191,12 +143,12 @@ dias_infecciosos_vac <- dias_infecciosos  # EDITAR si la literatura da una durac
 # planilla (hoja Modelo_SIRD, columna F) pero ahora como dos parametros
 # independientes, tal como los define el modelo SIVQRD (ecuaciones 23-29).
 gamma_total       <- 7 / dias_infecciosos
-delta             <- ifr_base * gamma_total        # tasa de mortalidad de I  (parametro delta, ec. 24 y 29)
+delta             <- (ifr_base/(1-ifr_base)) * gamma_total        # tasa de mortalidad de I  (parametro delta, ec. 24 y 29)
 gamma             <- (1 - ifr_base) * gamma_total   # tasa de recuperacion de I (parametro gamma, ec. 24 y 28)
 
 ifr_vacunados     <- ifr_base * (1 - ve_muerte)
 gamma_total_vac   <- 7 / dias_infecciosos_vac
-delta_v           <- ifr_vacunados * gamma_total_vac   # tasa de mortalidad de Iv (ec. 25 y 29)
+delta_v           <- (ifr_vacunados/(1-ifr_vacunados)) * gamma_total_vac   # tasa de mortalidad de Iv (ec. 25 y 29)
 gamma_v           <- (1 - ifr_vacunados) * gamma_total_vac  # tasa de recuperacion de Iv (ec. 25 y 28)
 
 ## 2.2 Tramos de beta (5 tramos, segun hitos de politica) -------------------
@@ -208,7 +160,7 @@ cortes_semana <- c(1,
                     semana_de_fecha(fecha_dispo),
                     semana_de_fecha(fecha_vacunacion),
                     semana_de_fecha(fecha_omicron),
-                    max(datos_semanales$semana) + 1)
+                    max(datos_owid_semanal$semana) + 1)
 
 tramos_def <- tibble(
   tramo      = 1:5,
@@ -318,7 +270,7 @@ for (k in seq_len(nrow(tramos_def))) {
       arrange(semana) %>%
       mutate(muertes_comparables = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
       filter(semana %in% semanas_tramo) %>%
-      left_join(datos_semanales %>% select(semana, muertes_owid), by = "semana")
+      left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana")
 
     mean((log1p(emisiones_comparables$muertes_comparables) - log1p(emisiones_comparables$muertes_owid))^2, na.rm = TRUE)
   }
@@ -383,7 +335,7 @@ resumen_tramos <- tramos_def %>%
 mse_global <- {
   comparacion_global <- emisiones_global %>%
     mutate(muertes_comparables = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
-    left_join(datos_semanales %>% select(semana, muertes_owid), by = "semana")
+    left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana")
   tibble(
     mse_nivel = mean((comparacion_global$muertes_comparables - comparacion_global$muertes_owid)^2, na.rm = TRUE),
     mse_log   = mean((log1p(comparacion_global$muertes_comparables) - log1p(comparacion_global$muertes_owid))^2, na.rm = TRUE)
@@ -416,7 +368,7 @@ fechas_quiebre <- c(fecha_aspo, fecha_dispo, fecha_vacunacion, fecha_omicron)
 
 grafico_muertes <- emisiones_global %>%
   mutate(muertes_modelo = dplyr::lag(muertes_emitidas, n = rezago_semanas, default = 0)) %>%
-  left_join(datos_semanales %>% select(semana, muertes_owid), by = "semana") %>%
+  left_join(datos_owid_semanal %>% select(semana, muertes_owid), by = "semana") %>%
   mutate(fecha = fecha_inicio_serie + (semana - 1) * 7) %>%
   select(fecha, muertes_modelo, muertes_owid) %>%
   pivot_longer(cols = c(muertes_modelo, muertes_owid), names_to = "serie", values_to = "muertes") %>%
