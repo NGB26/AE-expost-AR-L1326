@@ -20,8 +20,8 @@
 # alcance el maximo de iteraciones). Los demas parametros (gamma, delta,
 # sigma, beta_v, gamma_v, delta_v) son fijos y no se calibran.
 #
-# FUNCION DE PERDIDA: MSRE (Mean Squared Relative Error) semanal, es decir
-# el promedio de ((muertes modelo con rezago - muertes OWID) / muertes OWID)^2,
+# FUNCION DE PERDIDA: MSRE (Mean Squared Relative Error) semanal, calculado
+# sobre log1p(muertes) en vez de sobre el nivel (ver Bloque 3 para el porque),
 # tanto para beta como para theta.
 # ============================================================================
 
@@ -262,10 +262,19 @@ estado_inicial <- c(
 # simulada, contra las muertes semanales de OWID. Se reutiliza tanto para
 # calibrar beta y theta como para reportar el error global en el Bloque 4.
 #
-# MSRE = promedio( ((muertes_modelo - muertes_owid) / muertes_owid)^2 ). Las
-# semanas con 0 muertes observadas se excluyen (el error relativo no esta
-# definido ahi); en la serie de Argentina 2020-2022 no hay ninguna, pero se
-# cubre el caso igual.
+# El MSRE se calcula sobre log1p(muertes), no sobre el nivel: el error
+# relativo en NIVEL esta acotado por abajo en -1 (subestimar) pero no tiene
+# techo por arriba (sobreestimar), asi que en una dinamica exponencial como
+# esta el optimizador tiende a elegir beta casi nulo con tal de no arriesgar
+# una sobreestimacion explosiva (se probo: el tramo mas largo terminaba en el
+# piso del rango de busqueda y el modelo caia a ~0 el resto de la serie). El
+# error relativo sobre log1p(.) no tiene esa asimetria y mantiene el espiritu
+# del MSRE (pondera por igual semanas con pocas y con muchas muertes).
+#
+# MSRE = promedio( ((log1p(muertes_modelo) - log1p(muertes_owid)) / log1p(muertes_owid))^2 ).
+# Las semanas con 0 muertes observadas se excluyen (log1p(0) = 0, el error
+# relativo no esta definido ahi); en la serie de Argentina 2020-2022 no hay
+# ninguna, pero se cubre el caso igual.
 #
 # El rezago (dplyr::lag) se calcula SIEMPRE sobre la serie COMPLETA de
 # emisiones recibida (arrange() la ordena primero), para que las primeras
@@ -280,7 +289,9 @@ calcular_error_global <- function(emisiones, semanas_objetivo = NULL) {
   if (!is.null(semanas_objetivo)) {
     comparacion <- comparacion %>% filter(semana %in% semanas_objetivo)
   }
-  error_relativo <- (comparacion$muertes_comparables - comparacion$muertes_owid) / comparacion$muertes_owid
+  log_modelo <- log1p(comparacion$muertes_comparables)
+  log_owid   <- log1p(comparacion$muertes_owid)
+  error_relativo <- (log_modelo - log_owid) / log_owid
   error_relativo[comparacion$muertes_owid == 0] <- NA
   mean(error_relativo^2, na.rm = TRUE)
 }
