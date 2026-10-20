@@ -55,6 +55,32 @@ test_that("calcular_msre_log excluye (no rompe) semanas con 0 muertes observadas
   expect_true(is.finite(error))  # no debe dar NA ni Inf por las semanas en 0
 })
 
+test_that("calcular_rmse_log coincide con la formula a mano (RMSE de log1p)", {
+  # Caso chico y deterministico: rezago 0, sin semanas en 0, para comparar
+  # contra la cuenta a mano sqrt(mean((log1p(modelo)-log1p(obs))^2)).
+  n_poblacion <- 1e6
+  emisiones <- tibble::tibble(semana = 1:4, muertes_emitidas = c(10, 20, 30, 40) / n_poblacion)
+  datos_semanal <- tibble::tibble(semana = 1:4, muertes_owid = c(12, 18, 33, 40))
+
+  rmse <- calcular_rmse_log(emisiones, datos_semanal, n_poblacion, rezago_semanas = 0)
+
+  esperado <- sqrt(mean((log1p(c(10, 20, 30, 40)) - log1p(c(12, 18, 33, 40)))^2))
+  expect_equal(rmse, esperado, tolerance = 1e-10)
+  expect_gte(rmse, 0)
+})
+
+test_that("calcular_rmse_log SI cuenta las semanas con 0 muertes observadas (log1p(0)=0)", {
+  # A diferencia del error RELATIVO (calcular_msre_log), el RMSE-log penaliza
+  # predecir muertes donde no las hubo, sin dividir por cero.
+  n_poblacion <- 1e6
+  emisiones_malo <- tibble::tibble(semana = 1:2, muertes_emitidas = c(5, 0) / n_poblacion)
+  emisiones_bien <- tibble::tibble(semana = 1:2, muertes_emitidas = c(0, 0) / n_poblacion)
+  datos_semanal <- tibble::tibble(semana = 1:2, muertes_owid = c(0, 0))
+
+  expect_gt(calcular_rmse_log(emisiones_malo, datos_semanal, n_poblacion, 0), 0)
+  expect_equal(calcular_rmse_log(emisiones_bien, datos_semanal, n_poblacion, 0), 0)
+})
+
 test_that("calcular_residuos etiqueta cada semana con su tramo", {
   valores <- fixture_valores()
   biologicos <- fixture_biologicos(valores)
