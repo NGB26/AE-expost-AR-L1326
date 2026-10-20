@@ -11,6 +11,55 @@ Todos los numeros de este informe salen de una corrida real en
 datos inventados. El archivo `outputs/sessionInfo.txt` fija las versiones
 exactas de R y paquetes usadas.
 
+---
+
+## Actualizacion — calibracion re-especificada (solo beta, global, RMSE-log)
+
+El usuario re-especifico la calibracion. Esta version del repo implementa la
+nueva spec, que difiere del baseline historico descrito en la seccion 4 mas
+abajo (que queda como registro de la iteracion anterior). Cambios:
+
+1. **La UNICA variable de ajuste es `beta`** (un valor por cada uno de los 5
+   segmentos). `theta` **ya NO se calibra**: pasa a ser un parametro
+   estructural FIJO (`R/config.R::construir_config()$theta`, valor de trabajo
+   `0.3`, `# CONFIRMAR`). Justificacion: el efecto de las politicas de
+   confinamiento (ASPO/DISPO) sobre la transmision queda capturado por el
+   `beta` propio de cada segmento, asi que calibrar tambien `theta` seria
+   redundante y reintroduce la no-identificabilidad beta-theta que documentaba
+   la seccion 4. Se agrego `R/calibrate.R::analisis_sensibilidad_theta()` y
+   `outputs/sensibilidad_theta.csv` para mostrar cuanto depende el ajuste del
+   valor fijo de `theta`.
+
+2. **Ajuste GLOBAL y SIMULTANEO** (`calibrar_beta_global()`, `optim()`
+   L-BFGS-B): los 5 `beta` se mueven a la vez minimizando el error de **toda**
+   la serie, no segmento por segmento. El secuencial (`calibrar_secuencial()`)
+   queda solo como comparacion y warm start. En datos reales el global baja el
+   RMSE-log de ~2.25 (secuencial) a ~1.05: el optimo global aprovecha que el
+   estado heredado entre segmentos depende de los `beta` previos.
+
+3. **Funcion de perdida: RMSE de `log(1+muertes)`** (`calcular_rmse_log()`),
+   es decir `sqrt(mean((log1p(modelo) - log1p(obs))^2))`. Antes se minimizaba
+   el MSRE-log (error RELATIVO). El RMSE-log (a) es el que pidio la spec y (b)
+   SI cuenta las semanas con 0 muertes (log1p(0)=0), penalizando predecir
+   muertes donde no las hubo. El MSRE-log queda como metrica de diagnostico.
+
+4. **Parametros de literatura actualizados contra los papers aportados**:
+   `dias_infecciosos` = 11 dias y `dias_infecciosos_vac` = 8.7 dias (Kissler et
+   al., proliferacion + clearance; los vacunados eliminan el virus mas rapido,
+   lo que da `gamma_v > gamma`). IFR = 0.6% (meta-analisis de seroprevalencia;
+   NO el CFR 3.8% del reporte WHO-China, que sobreestima por subdeteccion).
+   `ve_contagio` se mantiene (Rearte et al., Lancet 2022, Argentina).
+
+5. **Ventana extendida a 2020-2023** (`fecha_fin_serie = 2023-12-31`). OWID
+   tiene datos de Argentina incluso hasta 2024, pero el reporte diario de
+   muertes se ralea desde mediados de 2022; la agregacion semanal descarta las
+   semanas incompletas y el tramo Omicron se apoya en las semanas con dato.
+
+6. **Nueva estructura de tasas implicitas** (`R/rates.R`): reconstruye stocks
+   y despeja `beta`/`sigma`/`delta`/`Re` semana a semana de los datos crudos,
+   al estilo de una planilla de Markov (ver sus advertencias sobre
+   subdeteccion de casos).
+
 ## Indice
 
 1. [Diagnostico (Prioridad 0)](#1-diagnostico-prioridad-0)

@@ -7,7 +7,7 @@ suppressMessages(library(testthat))
 suppressMessages(library(dplyr))
 
 directorio_raiz <- if (basename(getwd()) == "tests") ".." else "."
-for (archivo in c("config.R", "data.R", "model.R", "simulate.R", "metrics.R", "calibrate.R")) {
+for (archivo in c("config.R", "data.R", "model.R", "rates.R", "simulate.R", "metrics.R", "calibrate.R")) {
   source(file.path(directorio_raiz, "R", archivo))
 }
 

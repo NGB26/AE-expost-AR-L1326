@@ -33,8 +33,14 @@ construir_config <- function() {
       "Primer caso confirmado en Argentina reportado por OWID; semana 1 del modelo."
     ),
     fecha_fin_serie = parametro(
-      as.Date("2022-06-05"), "fecha",
-      "Ultima semana con datos homogeneos en la serie historica de OWID."
+      as.Date("2023-12-31"), "fecha",
+      paste(
+        "Fin de la ventana de extraccion/agregacion (serie 2020-2023, pedido del usuario).",
+        "OJO: Argentina dejo de reportar muertes a diario alrededor de mediados de 2022;",
+        "las semanas posteriores quedan ralas o en 0 y la agregacion semanal las marca como",
+        "incompletas (ver R/data.R::agregar_owid_semanal). El tramo Omicron de calibracion",
+        "cubre hasta esta fecha, pero el ajuste efectivo se apoya en las semanas con dato."
+      )
     ),
 
     # -- Fechas de corte de beta (5 tramos) ------------------------------------
@@ -73,12 +79,27 @@ construir_config <- function() {
 
     # -- Curso clinico no vacunado ----------------------------------------------
     dias_infecciosos = parametro(
-      10, "dias",
-      "Duracion del periodo infeccioso (recuperacion + muerte combinadas). Consenso post-pandemia citado en el Excel original (SIRD_Argentina_PCR.xlsx, hoja Parametros)."
+      11, "dias",
+      paste(
+        "Duracion del periodo infeccioso (tiempo en el compartimento I). Se usa la",
+        "duracion de la fase aguda de replicacion viral = proliferacion + clearance de",
+        "Kissler et al. (no vacunados): 3.5 dias de proliferacion + 7.5 dias de clearance",
+        "= 11 dias. Kissler SM, et al. 'Viral dynamics of SARS-CoV-2 variants in",
+        "vaccinated and unvaccinated individuals'. medRxiv 2021.02.16.21251535.",
+        "https://doi.org/10.1101/2021.02.16.21251535"
+      )
     ),
     ifr_base = parametro(
       0.006, "fraccion",
-      "IFR (infection fatality rate) base pre-vacunacion. Meta-analisis de seroprevalencia citado en el Excel original."
+      paste(
+        "IFR (infection fatality rate) base pre-vacunacion, ~0.6%. Meta-analisis de",
+        "seroprevalencia: Meyerowitz-Katz G, Merone L. 'A systematic review and",
+        "meta-analysis of published research data on COVID-19 infection fatality rates'.",
+        "Int J Infect Dis. 2020;101:138-148. https://doi.org/10.1016/j.ijid.2020.09.1464",
+        "(punto ~0.68%). NO confundir con el CFR crudo de 3.8% del reporte WHO-China",
+        "Joint Mission (2020), que sobreestima por subdeteccion de casos leves/asintomaticos.",
+        "# CONFIRMAR si se prefiere un IFR especifico de Argentina por estructura etaria."
+      )
     ),
 
     # -- Rezago de reporte ------------------------------------------------------
@@ -112,8 +133,14 @@ construir_config <- function() {
       )
     ),
     dias_infecciosos_vac = parametro(
-      10, "dias",
-      "Duracion del periodo infeccioso en vacunados. EDITAR si la literatura da un valor distinto al no vacunado (dias_infecciosos); por ahora se usa el mismo."
+      8.7, "dias",
+      paste(
+        "Duracion del periodo infeccioso en vacunados: 3.2 dias de proliferacion +",
+        "5.5 dias de clearance = 8.7 dias, de Kissler et al. (vacunados eliminan el virus",
+        "mas rapido que no vacunados: clearance 5.5 vs 7.5 dias). Esto es lo que hace que",
+        "gamma_v > gamma en el modelo (ver R/model.R::derivar_parametros_biologicos).",
+        "Kissler SM, et al. medRxiv 2021.02.16.21251535. https://doi.org/10.1101/2021.02.16.21251535"
+      )
     ),
 
     # -- Vacunacion: ritmo (sigma) ----------------------------------------------
@@ -125,19 +152,27 @@ construir_config <- function() {
       "Se calcula en tiempo de ejecucion a partir de la cobertura de 'vacunados completos' de OWID (ver R/data.R::calcular_sigma_desde_owid). NO es un valor de literatura: es el hazard semanal constante que reproduce la cobertura final observada."
     ),
 
-    # -- Cuarentena (theta) -------------------------------------------------
-    # theta YA NO es un parametro fijo: se calibra junto con beta (Bloque de
-    # calibracion). Aca solo se fija el punto de partida y las cotas de
-    # busqueda del optimizador.
-    theta_inicial = parametro(0.1, "1/semana", "Punto de partida para la calibracion. No es un valor estimado."),
-    theta_min      = parametro(0,   "1/semana", "Cota inferior de busqueda de theta."),
-    theta_max      = parametro(2,   "1/semana", "Cota superior de busqueda de theta."),
+    # -- Cuarentena (theta): FIJO, no se calibra -------------------------------
+    # Decision del usuario: beta es la UNICA variable de ajuste. theta pasa a
+    # ser un parametro estructural FIJO. El efecto de las politicas de
+    # confinamiento (ASPO/DISPO) sobre la transmision queda capturado por el
+    # beta PROPIO de cada segmento, no por theta; theta representa solo el
+    # aislamiento "de base" de casos detectados, constante en toda la serie.
+    theta = parametro(
+      0.3, "1/semana",
+      paste(
+        "SUPUESTO estructural, NO calibrado y NO tomado de una cita directa: hazard",
+        "semanal constante al que los infectados detectados entran en aislamiento (Q).",
+        "Fijo por decision del usuario (solo beta se calibra). Los cambios de transmision",
+        "por politica (ASPO/DISPO) los absorbe el beta de cada segmento. # CONFIRMAR valor;",
+        "ver el analisis de sensibilidad OAT sobre theta en scripts/run.R."
+      )
+    ),
 
-    # -- Calibracion ------------------------------------------------------------
+    # -- Calibracion (solo beta) -----------------------------------------------
     beta_min = parametro(0.01, "1/semana", "Cota inferior de busqueda de beta, igual que en el Excel original."),
     beta_max = parametro(2,    "1/semana", "Cota superior de busqueda de beta, igual que en el Excel original."),
-    max_iteraciones_externas = parametro(5, "iteraciones", "Tope de pasadas beta<->theta del proceso iterativo."),
-    tolerancia_convergencia  = parametro(1e-6, "adimensional", "Mejora minima de error_global para seguir iterando.")
+    maxit_optimizador = parametro(500, "iteraciones", "Tope de iteraciones de optim() (L-BFGS-B) en la calibracion conjunta global de los beta.")
   )
 }
 
@@ -171,8 +206,7 @@ validar_config <- function(cfg, exigir_sigma = TRUE) {
     dias_infecciosos_vac       = c(1, 60),
     rezago_semanas            = c(0, 10),
     i0_personas                = c(0, Inf),
-    theta_min                  = c(0, Inf),
-    theta_max                  = c(0, Inf),
+    theta                      = c(0, 10),
     beta_min                   = c(0, Inf),
     beta_max                   = c(0, Inf),
     sigma                      = c(0, 10)
@@ -201,9 +235,6 @@ validar_config <- function(cfg, exigir_sigma = TRUE) {
     }
   }
 
-  if (valores$theta_min >= valores$theta_max) {
-    stop("config invalida: theta_min debe ser menor que theta_max.", call. = FALSE)
-  }
   if (valores$beta_min >= valores$beta_max) {
     stop("config invalida: beta_min debe ser menor que beta_max.", call. = FALSE)
   }

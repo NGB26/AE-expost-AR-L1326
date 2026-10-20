@@ -33,15 +33,26 @@ simular_tramo <- function(estado_inicial, semana_ini, semana_fin, beta_valor, pa
   tiempos <- seq(semana_ini, semana_fin + 1, by = 1)
   parms <- c(parametros_fijos, list(beta_fun = function(t) beta_valor))
   # maxsteps subido del default de lsoda (5000): en combinaciones EXTREMAS de
-  # beta y theta (cerca de sus cotas superiores a la vez, como las que prueba
-  # generar_perfil_identificabilidad()) el sistema se vuelve rigido y el
-  # default no alcanza. Si aun asi no converge, se levanta un error explicito
-  # en vez de devolver filas con NaN silenciosas (ver mas abajo).
-  salida <- ode(y = estado_inicial, times = tiempos, func = derivadas_sivqrd, parms = parms,
-                method = "lsoda", maxsteps = 100000)
-  if (any(!is.finite(salida[, -1]))) {
+  # beta y theta (cerca de sus cotas superiores a la vez, como las que prueban
+  # los barridos de sensibilidad sobre la serie larga 2020-2023) el sistema se
+  # vuelve rigido. Se intenta primero lsoda (rapido, auto-switch); si lsoda
+  # falla o devuelve no-finitos, se reintenta con un solver stiff explicito
+  # (BDF via lsode, "method=bdf"). Solo si AMBOS fallan se levanta un error
+  # explicito, que los optimizadores de R/calibrate.R atrapan y convierten en
+  # una penalizacion finita (para no cortar la calibracion por una region de
+  # parametros infactible). Las ecuaciones con beta/theta razonables integran
+  # bien con lsoda; esto es una red de seguridad para el barrido del optimo.
+  integrar <- function(metodo) {
+    ode(y = estado_inicial, times = tiempos, func = derivadas_sivqrd, parms = parms,
+        method = metodo, maxsteps = 100000)
+  }
+  salida <- tryCatch(integrar("lsoda"), error = function(e) NULL)
+  if (is.null(salida) || any(!is.finite(salida[, -1]))) {
+    salida <- tryCatch(integrar("bdf"), error = function(e) NULL)  # reintento stiff
+  }
+  if (is.null(salida) || any(!is.finite(salida[, -1]))) {
     stop(sprintf(
-      "simular_tramo(): la integracion no convergio entre semana %s y %s (beta=%.4f): el resultado tiene valores no finitos. Revisar si beta/theta estan en un rango numericamente extremo.",
+      "simular_tramo(): la integracion no convergio entre semana %s y %s (beta=%.4f) ni con lsoda ni con bdf: el sistema quedo numericamente rigido/inestable en ese rango de parametros.",
       semana_ini, semana_fin, beta_valor
     ), call. = FALSE)
   }
@@ -144,9 +155,15 @@ ajustar_betas_secuencial <- function(estado_inicial, tramos_def, parametros_fijo
     semanas_tramo <- seq(semana_ini_k, semana_fin_k, by = 1)
 
     calcular_error_tramo <- function(beta_k) {
-      sim <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, beta_k, parametros_fijos)
-      candidatas <- tibble(semana = semanas_tramo, muertes_emitidas = diff(sim$d))
-      funcion_error(bind_rows(emisiones, candidatas), semanas_objetivo = semanas_tramo)
+      # tryCatch -> penalizacion finita si el ODE no integra para este beta
+      # (ver nota en R/calibrate.R y en simular_tramo), para no cortar el
+      # ajuste secuencial en una region de parametros infactible.
+      err <- tryCatch({
+        sim <- simular_tramo(estado_actual, semana_ini_k, semana_fin_k, beta_k, parametros_fijos)
+        candidatas <- tibble(semana = semanas_tramo, muertes_emitidas = diff(sim$d))
+        funcion_error(bind_rows(emisiones, candidatas), semanas_objetivo = semanas_tramo)
+      }, error = function(e) NA_real_)
+      if (!is.finite(err)) 1e6 else err
     }
 
     ajuste <- optimize(calcular_error_tramo, interval = c(beta_min, beta_max), tol = tol)

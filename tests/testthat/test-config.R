@@ -14,11 +14,16 @@ test_that("validar_config frena ante un parametro fuera de rango", {
   expect_error(validar_config(cfg, exigir_sigma = FALSE), "fuera del rango")
 })
 
-test_that("validar_config frena ante theta_min >= theta_max", {
+test_that("theta es un parametro FIJO (no de calibracion) y esta dentro de rango", {
   cfg <- construir_config()
-  cfg$theta_min$valor <- 1
-  cfg$theta_max$valor <- 1
-  expect_error(validar_config(cfg, exigir_sigma = FALSE), "theta_min")
+  # theta ya no se calibra: existe como valor unico, no como cotas de busqueda.
+  expect_true(!is.null(cfg$theta))
+  expect_null(cfg$theta_min)
+  expect_null(cfg$theta_max)
+  expect_true(validar_config(cfg, exigir_sigma = FALSE))
+
+  cfg$theta$valor <- 50  # fuera del rango plausible [0, 10]
+  expect_error(validar_config(cfg, exigir_sigma = FALSE), "fuera del rango")
 })
 
 test_that("validar_config frena ante fechas de corte fuera de orden", {

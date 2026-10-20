@@ -7,9 +7,31 @@ This project is to build the economic analysis of the project AR-L1326
 
 Implementa en R el modelo SIVQRD descrito en `Modelo_SIR_para_PCR.docx`
 (ecuaciones 23-31), calibrado contra la serie semanal de muertes de Our
-World in Data (OWID) para Argentina. No depende de Excel: todos los
-parametros se declaran a mano en `R/config.R`, con su unidad y su fuente
+World in Data (OWID) para Argentina (2020-2023). No depende de Excel: todos
+los parametros se declaran a mano en `R/config.R`, con su unidad y su fuente
 bibliografica (o la razon de no tenerla).
+
+### Especificacion de la calibracion
+
+- **4 fechas de corte HARDCODEADAS** (en `R/config.R`) que definen **5
+  segmentos**: comienzo de ASPO, comienzo de DISPO, comienzo de vacunacion y
+  Omicron.
+- **La UNICA variable de ajuste es `beta`** (un valor por segmento).
+- **Funcion de perdida: RMSE de `log(1+muertes)`** del modelo vs. OWID
+  (`R/metrics.R::calcular_rmse_log`).
+- **Ajuste GLOBAL y SIMULTANEO**: los 5 `beta` se optimizan a la vez para
+  minimizar el RMSE de toda la serie (`R/calibrate.R::calibrar_beta_global`),
+  no segmento por segmento. El ajuste secuencial queda solo como comparacion.
+- **Parametros FIJOS de literatura**: efectividad vacunal frente al contagio
+  (`ve_contagio`), IFR, y de ahi `gamma`/`delta` (via la duracion del periodo
+  infeccioso de Kissler et al.). **`theta` tambien es fijo** (no se calibra):
+  el efecto del confinamiento lo absorbe el `beta` propio de cada segmento.
+- **`sigma` se calcula de los datos** reales de vacunacion de OWID, no de
+  literatura (`R/data.R::calcular_sigma_desde_owid`).
+
+Ademas, `R/rates.R` arma una **estructura de tasas IMPLICITAS por semana**
+(beta, sigma, delta, Re...) reconstruidas de los datos crudos al estilo de una
+planilla de Markov, como diagnostico y punto de partida de la calibracion.
 
 **Para entender las decisiones detras de este diseño** (que bugs se
 encontraron y donde, por que se corrigio cada formula, los resultados de
@@ -25,17 +47,18 @@ R/
   config.R     Todos los parametros del modelo (valor, unidad, fuente) + validacion
   data.R       Descarga/cache/validacion de OWID, agregacion semanal, calculo de sigma
   model.R      Ecuaciones diferenciales (SIVQRD), parametros biologicos derivados, R0/Re
+  rates.R      Tasas IMPLICITAS por semana (reconstruccion tipo Markov-Excel) + resumen por tramo
   simulate.R   Integracion numerica (deSolve) y ajuste secuencial de beta, sin estado global
-  metrics.R    Funcion de perdida (MSRE-log) y metricas de diagnostico
-  calibrate.R  Calibracion: baseline secuencial-alternante, alternativa conjunta,
-               identificabilidad (perfil, multi-start), sensibilidad OAT, bootstrap
+  metrics.R    Funcion de perdida principal (RMSE-log) + MSRE y metricas de diagnostico
+  calibrate.R  Calibracion de beta (solo beta): global simultaneo (principal), secuencial
+               (comparacion), sensibilidad a theta, sensibilidad OAT, multi-start, bootstrap
 scripts/
   run.R                           Orquesta todo el pipeline y escribe outputs/
-  modelo_sivqrd_argentina.R       Version anterior (script unico), queda de referencia
+  modelo_sivqrd_argentina.R       Version anterior (script unico), queda de referencia historica
 tests/
   testthat.R                      Punto de entrada de los tests
   testthat/helper-fixtures.R      Datos y config sinteticos (sin internet)
-  testthat/test-*.R               92 expectativas sobre R/*.R
+  testthat/test-*.R               Tests sobre R/*.R
 data/
   raw/     Excel original (SIRD_Argentina_PCR.xlsx), solo como referencia historica
   cache/   Cache local de OWID (se genera sola al correr; no versionada en git)
@@ -115,21 +138,22 @@ Descarga (o usa la cache de) OWID, calibra el modelo, y escribe todo en
 completos (`*.rds`, para seguir explorando en una sesion de R con
 `readRDS()`) y `sessionInfo.txt`.
 
-**Tiempo esperado:** con todos los diagnosticos activados (que es el
-default), entre 5 y 10 minutos — el paso mas caro es la calibracion
-conjunta global (~3-4 minutos). Para una corrida rapida (~15-30 segundos,
-solo el baseline), editar el bloque `opciones` al principio de
-`scripts/run.R` y poner en `FALSE` los pasos que no se necesiten:
+**Tiempo esperado:** con la serie 2020-2023 (~199 semanas), cada calibracion
+global tarda ~1-3 minutos (el ODE corre sobre toda la serie en cada evaluacion
+del optimizador). Con los defaults (secuencial + global + sensibilidad a
+theta), una corrida tarda ~7-10 minutos. Los diagnosticos que corren VARIAS
+calibraciones estan **apagados** por defecto; prenderlos en el bloque
+`opciones` al principio de `scripts/run.R` para el analisis completo:
 
 ```r
 opciones <- list(
-  forzar_descarga_owid   = FALSE,
-  correr_calibracion_conjunta = FALSE,      # ~3-4 min
-  correr_perfil_identificabilidad = FALSE,  # ~3-10s
-  correr_multistart      = FALSE,           # ~30s
-  correr_sensibilidad    = FALSE,           # ~1-2 min
-  correr_bootstrap       = FALSE,           # ~20-60s
-  n_rep_bootstrap        = 20
+  forzar_descarga_owid      = FALSE,
+  correr_secuencial         = TRUE,   # ajuste secuencial: comparacion + warm start (~10-20s)
+  correr_multistart         = FALSE,  # robustez del optimo global (~5 calibraciones)
+  correr_sensibilidad_theta = TRUE,   # barrido del theta FIJO (~4 calibraciones)
+  correr_sensibilidad_oat   = FALSE,  # OAT sobre parametros de literatura (~11 calibraciones, lento)
+  correr_bootstrap          = FALSE,  # bootstrap de los beta (muy lento)
+  n_rep_bootstrap           = 20
 )
 ```
 
@@ -151,3 +175,10 @@ ver [DECISIONS.md, seccion 2.4](DECISIONS.md#24-rezago-de-muertes-vs-tiempo-a-mu
 sobre `rezago_semanas` en particular). Despues de editar, `Rscript
 scripts/run.R` valida la config de entrada (`validar_config()`, falla
 explicito si algo quedo en `NA` o fuera de rango) antes de correr nada.
+
+Dos parametros a revisar en particular: **`theta`** (fijo, no calibrado:
+valor de trabajo `0.3`, marcado `# CONFIRMAR`; el barrido de sensibilidad en
+`outputs/sensibilidad_theta.csv` muestra cuanto cambia el ajuste con el) e
+**`ifr_base`** (IFR base, `# CONFIRMAR` si se prefiere uno especifico de
+Argentina). La clinica (`dias_infecciosos`, `dias_infecciosos_vac`) sale de
+Kissler et al.; `ve_contagio` de Rearte et al. (Lancet 2022, Argentina).

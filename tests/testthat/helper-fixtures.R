@@ -14,13 +14,13 @@ fixture_valores <- function() {
     fecha_vacunacion   = as.Date("2021-03-21"),  # semana 12
     fecha_omicron      = as.Date("2021-05-23"),  # ultima semana: sin tramo 5 util
     s0_frac = 1, i0_personas = 50,
-    dias_infecciosos = 10, dias_infecciosos_vac = 10,
+    dias_infecciosos = 11, dias_infecciosos_vac = 8.7,
     ifr_base = 0.01, ve_muerte = 0.7, ve_contagio = 0.5,
     rezago_semanas = 2,
     sigma = 0.05,
-    theta_inicial = 0.1, theta_min = 0, theta_max = 2,
+    theta = 0.3,
     beta_min = 0.01, beta_max = 2,
-    max_iteraciones_externas = 3, tolerancia_convergencia = 1e-6
+    maxit_optimizador = 200
   )
 }
 

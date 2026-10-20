@@ -72,6 +72,30 @@ calcular_msre_log <- function(emisiones, datos_semanales, n_poblacion, rezago_se
   mean(error_relativo^2, na.rm = TRUE)
 }
 
+#' FUNCION DE PERDIDA PRINCIPAL (la que se minimiza en la calibracion):
+#' RMSE de log(1+muertes), exactamente como pide la especificacion.
+#'
+#'   RMSE_log = sqrt( promedio_semanas( (log1p(muertes_modelo) - log1p(muertes_owid))^2 ) )
+#'
+#' A diferencia de calcular_msre_log() (error RELATIVO, divide por log1p(obs)),
+#' aca el error es ABSOLUTO en la escala log1p y se toma la raiz del promedio
+#' de cuadrados. La transformacion log1p (en vez del nivel) evita que las
+#' semanas de pico epidemico, con muchas muertes, dominen por completo el
+#' ajuste y aplasten a las semanas de valle: pondera de forma pareja ordenes
+#' de magnitud distintos de muertes semanales, que es justo lo que se quiere
+#' cuando una misma serie pasa de decenas a miles de muertes por semana.
+#'
+#' log1p(0) = 0, asi que las semanas con 0 muertes observadas SI entran (su
+#' aporte es (log1p(modelo) - 0)^2): penalizan al modelo que predice muertes
+#' donde no las hubo, sin el problema de division por cero del error relativo.
+#'
+#' @return Un numero (la raiz del error cuadratico medio en escala log1p).
+calcular_rmse_log <- function(emisiones, datos_semanales, n_poblacion, rezago_semanas, semanas_objetivo = NULL) {
+  comparacion <- alinear_muertes_con_rezago(emisiones, datos_semanales, n_poblacion, rezago_semanas, semanas_objetivo)
+  error_log <- log1p(comparacion$muertes_modelo) - log1p(comparacion$muertes_owid)
+  sqrt(mean(error_log^2, na.rm = TRUE))
+}
+
 #' MSE en nivel (diagnostico, NO es la funcion de perdida que se minimiza).
 calcular_mse_nivel <- function(emisiones, datos_semanales, n_poblacion, rezago_semanas) {
   comparacion <- alinear_muertes_con_rezago(emisiones, datos_semanales, n_poblacion, rezago_semanas)
